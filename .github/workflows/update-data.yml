@@ -1,0 +1,166 @@
+name: Atualização diária dos dados SUS
+
+# ── Disparado automaticamente todo dia às 6h BRT (9h UTC)
+# ── Pode ser disparado manualmente pela aba Actions do GitHub
+on:
+  schedule:
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+    inputs:
+      fonte:
+        description: 'Fonte a atualizar'
+        required: false
+        default: 'all'
+        type: choice
+        options: [all, sigtap, cnes]
+      forcar:
+        description: 'Forçar atualização mesmo sem novos dados'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  PYTHON_VERSION: '3.12'
+
+jobs:
+  # ────────────────────────────────────────────── verificação de updates
+  check:
+    name: Verificar se há novos dados
+    runs-on: ubuntu-latest
+    outputs:
+      sigtap_updated: ${{ steps.check.outputs.sigtap_updated }}
+      sigtap_file:    ${{ steps.check.outputs.sigtap_file }}
+      cnes_updated:   ${{ steps.check.outputs.cnes_updated }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Instala dependências mínimas para verificação
+        run: pip install requests psycopg2-binary sqlalchemy
+
+      - name: Verifica atualizações disponíveis
+        id: check
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FORCE:        ${{ github.event.inputs.forcar || 'false' }}
+          FONTE:        ${{ github.event.inputs.fonte  || 'all'   }}
+        run: python backend/scripts/check_updates.py
+
+  # ────────────────────────────────────────────── ETL SIGTAP + CID-10
+  etl-sigtap:
+    name: ETL SIGTAP + CID-10
+    runs-on: ubuntu-latest
+    needs: check
+    if: |
+      needs.check.outputs.sigtap_updated == 'true' ||
+      github.event.inputs.fonte == 'sigtap' ||
+      github.event.inputs.fonte == 'all'
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Instala dependências
+        run: pip install -r backend/requirements.txt
+
+      - name: Executa ETL SIGTAP
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATA_DIR:     /tmp/sus_data
+          LOG_LEVEL:    INFO
+        run: |
+          cd backend
+          python -m etl.run_all --source sigtap
+
+      - name: Resumo do ETL
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          cd backend
+          python3 -c "
+          import os
+          from sqlalchemy import create_engine, text
+          engine = create_engine(os.environ['DATABASE_URL'])
+          with engine.connect() as c:
+              rows = c.execute(text(
+                  \"SELECT code, record_count, loaded_at FROM sources ORDER BY code\"
+              )).fetchall()
+              print('\n=== FONTES ===')
+              for r in rows:
+                  print(f'  {r[0]:10s} {r[1]:>8,} registros  {r[2]}')
+          "
+
+  # ────────────────────────────────────────────── ETL CNES (via DEMAS)
+  etl-cnes:
+    name: ETL CNES via DEMAS
+    runs-on: ubuntu-latest
+    needs: check
+    if: |
+      needs.check.outputs.cnes_updated == 'true' ||
+      github.event.inputs.fonte == 'cnes' ||
+      github.event.inputs.fonte == 'all'
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Instala dependências
+        run: pip install -r backend/requirements.txt
+
+      - name: Executa ETL CNES
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATA_DIR:     /tmp/sus_data
+          LOG_LEVEL:    INFO
+        run: |
+          cd backend
+          python -m etl.run_all --source cnes
+
+  # ────────────────────────────────────────────── Health check pós-ETL
+  verify:
+    name: Verificação pós-carga
+    runs-on: ubuntu-latest
+    needs: [etl-sigtap, etl-cnes]
+    if: always()
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Instala dependências mínimas
+        run: pip install psycopg2-binary sqlalchemy requests
+
+      - name: Verifica integridade dos dados
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python backend/scripts/verify_data.py
+
+      - name: Notifica via API health check
+        if: success()
+        env:
+          API_URL: ${{ secrets.API_URL }}
+        run: |
+          if [ -n "$API_URL" ]; then
+            STATUS=$(curl -sf "$API_URL/api/v1/health" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status','?'), d.get('total_terms','?'), 'termos')" 2>/dev/null || echo "unreachable")
+            echo "API status: $STATUS"
+          fi

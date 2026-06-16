@@ -1,0 +1,64 @@
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: sus_search_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER:-sus}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}   # defina no .env
+      POSTGRES_DB:       ${POSTGRES_DB:-sus_search}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sus} -d ${POSTGRES_DB:-sus_search}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── LLM local gratuito via Ollama (opcional)
+  # Ativar: docker compose --profile ollama up
+  # Baixar modelo: docker compose exec ollama ollama pull llama3.2:3b
+  ollama:
+    image: ollama/ollama:latest
+    container_name: sus_search_ollama
+    profiles: ["ollama"]
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: sus_search_backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-sus}:${POSTGRES_PASSWORD:-changeme}@db:5432/${POSTGRES_DB:-sus_search}
+      DATA_DIR: /app/data
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: sus_search_frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+  ollama_data:

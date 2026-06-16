@@ -1,0 +1,53 @@
+# ─── Python ─────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+build/
+*.so
+.venv/
+venv/
+env/
+
+# ─── Variáveis de ambiente (NUNCA commitar) ──────────
+.env
+.env.*
+!.env.example
+backend/.env
+frontend/.env
+DEPLOY.md
+
+# ─── Dados brutos (arquivos grandes) ─────────────────
+data/
+!data/.gitkeep
+
+# ─── Node ────────────────────────────────────────────
+node_modules/
+dist/
+*.local
+frontend/dist/
+
+# ─── Docker ──────────────────────────────────────────
+.docker/
+
+# ─── IDE ─────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ─── Testes e cobertura ──────────────────────────────
+.coverage
+htmlcov/
+coverage/
+*.lcov
+.pytest_cache/
+
+# ─── Logs ────────────────────────────────────────────
+*.log
+logs/

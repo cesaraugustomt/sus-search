@@ -1,0 +1,43 @@
+name: Deploy para Produção
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+  workflow_dispatch:
+
+jobs:
+  etl-producao:
+    name: ETL inicial — disparar manualmente
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12', cache: pip}
+      - run: pip install -r backend/requirements.txt
+      - name: Inicializa banco e carrega dados
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATA_DIR: /tmp/sus_data
+        run: |
+          cd backend
+          python -c "from app.db.session import init_db; init_db(); print('Schema criado')"
+          python -m etl.run_all --source sigtap
+          python -m etl.run_all --source cnes
+          python scripts/verify_data.py
+
+  health-check:
+    name: Health check pós-deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verifica backend
+        env:
+          API_URL: ${{ secrets.API_URL }}
+        run: |
+          if [ -n "$API_URL" ]; then
+            sleep 45
+            curl -sf "$API_URL/api/v1/health" | python3 -m json.tool || echo "Backend indisponível"
+          fi
