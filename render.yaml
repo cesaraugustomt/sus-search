@@ -1,24 +1,17 @@
-# ─── Render.com — deploy do backend FastAPI
-# Conecte o repositório GitHub em https://render.com
-# New Web Service → selecione o repo → configure conforme abaixo
-
 services:
   - type: web
     name: sus-search-backend
     runtime: python
-    rootDir: backend
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
-    plan: free          # 750h/mês — suficiente para 1 serviço
+    plan: free
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/v1/health
-
     envVars:
       - key: DATABASE_URL
-        sync: false     # preencher manualmente no dashboard com a URL do Neon
+        sync: false
       - key: LOG_LEVEL
         value: INFO
       - key: DEBUG
         value: "false"
       - key: ALLOWED_ORIGINS
-        value: "https://sus-search.vercel.app,http://localhost:3000"
-        # ↑ substituir pela URL real do Vercel depois do primeiro deploy
+        value: "https://sus-search-ppginfos.vercel.app,http://localhost:3000"
