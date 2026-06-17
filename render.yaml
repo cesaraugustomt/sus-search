@@ -14,4 +14,4 @@ services:
       - key: DEBUG
         value: "false"
       - key: ALLOWED_ORIGINS
-        value: "https://sus-search-ppginfos.vercel.app,http://localhost:3000"
+        value: "https://sus-search.vercel.app,http://localhost:3000"
