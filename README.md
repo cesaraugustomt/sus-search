@@ -1,7 +1,9 @@
 # SUS Search 🔬
 
 Mecanismo de busca unificado para recursos oficiais do SUS.  
-**Projeto acadêmico — PPGINFOS/UFSC — Informática em Saúde.**
+**Projeto acadêmico — PPGINFOS/UFSC — Mestrado Profissional em Informática em Saúde.**
+
+![SUS Search - Gif de demonstração da interface de busca](public/sus-search.gif)
 
 ---
 
@@ -28,7 +30,7 @@ Mecanismo de busca unificado para recursos oficiais do SUS.
 
 ```bash
 # 1. Clone e configure
-git clone <repo-url> sus-search
+git clone https://github.com/cesaraugustomt/sus-search.git
 cd sus-search
 cp .env.example .env        # edite senhas se necessário
 
@@ -297,3 +299,6 @@ sus-search/
 ├── .env.example
 └── README.md
 ```
+
+
+
