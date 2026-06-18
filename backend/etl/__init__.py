@@ -1,11 +1,8 @@
 """
-ETL package — importadores das bases SUS (SIGTAP, CID-10, CNES).
-
-Uso via run_all:
-    python -m etl.run_all               # todas as fontes
-    python -m etl.run_all --source cnes # fonte específica
+ETL package — importadores das bases SUS (SIGTAP, CID-10, CNES, CIAP-2).
 """
-from etl.sigtap import SIGTAPEtl
-from etl.cnes import CNESEtl
+from etl.sigtap    import SIGTAPEtl
+from etl.demas_cnes import DEMASCNESEtl
+from etl.ciap2     import CIAP2Etl
 
-__all__ = ["SIGTAPEtl", "CNESEtl"]
+__all__ = ["SIGTAPEtl", "DEMASCNESEtl", "CIAP2Etl"]

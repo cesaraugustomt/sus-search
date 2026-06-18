@@ -2,9 +2,10 @@
 Runner central do ETL — executa todos os importadores em sequência.
 
 Uso:
-  python -m etl.run_all                  # todos
-  python -m etl.run_all --source sigtap  # apenas SIGTAP + CID-10
-  python -m etl.run_all --source cnes    # apenas CNES via DEMAS (sem autenticação)
+  python -m etl.run_all                   # todos
+  python -m etl.run_all --source sigtap   # SIGTAP + CID-10
+  python -m etl.run_all --source cnes     # CNES via DEMAS
+  python -m etl.run_all --source ciap2    # CIAP-2 (hardcoded, instantâneo)
 """
 import argparse
 import logging
@@ -16,14 +17,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.core.logging import setup_logging
 from app.db.session import SessionLocal, init_db
 from etl.sigtap import SIGTAPEtl
-from etl.demas_cnes import DEMASCNESEtl      # ← CNES via API pública DEMAS
+from etl.demas_cnes import DEMASCNESEtl
+from etl.ciap2 import CIAP2Etl
 
 setup_logging()
 logger = logging.getLogger(__name__)
 
 SOURCES = {
     "sigtap": SIGTAPEtl,
-    "cnes":   DEMASCNESEtl,   # API pública, sem autenticação
+    "cnes":   DEMASCNESEtl,
+    "ciap2":  CIAP2Etl,
 }
 
 
@@ -36,7 +39,7 @@ def run_etl(source: str = "all") -> dict[str, int]:
         for name, EtlClass in targets.items():
             logger.info(f"\n── {name.upper()} {'─'*40}")
             try:
-                etl = EtlClass(db)
+                etl   = EtlClass(db)
                 count = etl.run()
                 results[name] = count
             except Exception as e:
@@ -50,7 +53,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="SUS Search ETL Runner")
     parser.add_argument(
         "--source",
-        choices=["all", "sigtap", "cnes"],
+        choices=["all", "sigtap", "cnes", "ciap2"],
         default="all",
         help="Fonte a importar (padrão: all)",
     )

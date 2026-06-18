@@ -17,7 +17,6 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
 def get_db() -> Generator[Session, None, None]:
-    """Dependency para injeção de sessão nos endpoints do FastAPI."""
     db = SessionLocal()
     try:
         yield db
@@ -26,10 +25,6 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def init_db() -> None:
-    """
-    Cria extensões, tabelas, índices e constraints no PostgreSQL.
-    Idempotente — seguro rodar múltiplas vezes.
-    """
     with engine.connect() as conn:
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS unaccent;"))
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm;"))
@@ -66,7 +61,6 @@ def init_db() -> None:
             );
         """))
 
-        # Constraint de unicidade para ON CONFLICT funcionar no bulk_insert
         conn.execute(text("""
             DO $$
             BEGIN
@@ -81,32 +75,15 @@ def init_db() -> None:
             $$;
         """))
 
-        # Trigger para manter o search_vector atualizado
         conn.execute(text("""
             CREATE OR REPLACE FUNCTION update_terms_search_vector()
             RETURNS TRIGGER AS $$
             BEGIN
                 NEW.search_vector :=
-                    setweight(
-                        to_tsvector('portuguese',
-                            unaccent(coalesce(NEW.name, ''))
-                        ), 'A'
-                    ) ||
-                    setweight(
-                        to_tsvector('portuguese',
-                            unaccent(coalesce(NEW.description, ''))
-                        ), 'B'
-                    ) ||
-                    setweight(
-                        to_tsvector('simple',
-                            unaccent(coalesce(NEW.code, ''))
-                        ), 'A'
-                    ) ||
-                    setweight(
-                        to_tsvector('portuguese',
-                            unaccent(coalesce(NEW.category, ''))
-                        ), 'C'
-                    );
+                    setweight(to_tsvector('portuguese', unaccent(coalesce(NEW.name, ''))), 'A') ||
+                    setweight(to_tsvector('portuguese', unaccent(coalesce(NEW.description, ''))), 'B') ||
+                    setweight(to_tsvector('simple',     unaccent(coalesce(NEW.code, ''))), 'A') ||
+                    setweight(to_tsvector('portuguese', unaccent(coalesce(NEW.category, ''))), 'C');
                 RETURN NEW;
             END;
             $$ LANGUAGE plpgsql;
@@ -116,28 +93,16 @@ def init_db() -> None:
             DROP TRIGGER IF EXISTS terms_search_vector_trigger ON terms;
             CREATE TRIGGER terms_search_vector_trigger
                 BEFORE INSERT OR UPDATE OF name, description, code, category
-                ON terms
-                FOR EACH ROW
+                ON terms FOR EACH ROW
                 EXECUTE FUNCTION update_terms_search_vector();
         """))
 
-        # Índices
-        conn.execute(text(
-            "CREATE INDEX IF NOT EXISTS idx_terms_search "
-            "ON terms USING GIN(search_vector);"
-        ))
-        conn.execute(text(
-            "CREATE INDEX IF NOT EXISTS idx_terms_source ON terms(source);"
-        ))
-        conn.execute(text(
-            "CREATE INDEX IF NOT EXISTS idx_terms_code ON terms(code);"
-        ))
-        conn.execute(text(
-            "CREATE INDEX IF NOT EXISTS idx_terms_name_trgm "
-            "ON terms USING GIN(name gin_trgm_ops);"
-        ))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_terms_search ON terms USING GIN(search_vector);"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_terms_source ON terms(source);"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_terms_code   ON terms(code);"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_terms_name_trgm ON terms USING GIN(name gin_trgm_ops);"))
 
-        # Fontes conhecidas
+        # Fontes — inclui CIAP2
         conn.execute(text("""
             INSERT INTO sources (code, name, description, official_url)
             VALUES
@@ -149,7 +114,10 @@ def init_db() -> None:
                'https://rts.saude.gov.br'),
               ('CNES', 'CNES',
                'Cadastro Nacional de Estabelecimentos de Saúde',
-               'https://cnes.datasus.gov.br')
+               'https://cnes.datasus.gov.br'),
+              ('CIAP2', 'CIAP-2',
+               'Classificação Internacional de Atenção Primária, 2ª Edição (WONCA / SBMFC)',
+               'https://www.sbmfc.org.br/classificacao-internacional-da-atencao-primaria-ciap-2/')
             ON CONFLICT (code) DO NOTHING;
         """))
 

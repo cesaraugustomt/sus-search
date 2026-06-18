@@ -1,6 +1,6 @@
 // ── Tipos de domínio do SUS Search
 
-export type SourceCode = "SIGTAP" | "CID10" | "CNES";
+export type SourceCode = "SIGTAP" | "CID10" | "CNES" | "CIAP2";
 
 export interface Term {
   id: number;

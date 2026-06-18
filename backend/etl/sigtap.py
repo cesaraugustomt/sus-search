@@ -1,20 +1,5 @@
 """
 ETL SIGTAP — procedimentos, CID-10 e relacionamento procedimento↔CID.
-
-Lê do ZIP (cache local ou download do GitHub mirror):
-  tb_procedimento.txt      → procedimentos com campos enriquecidos
-  tb_cid.txt               → CIDs únicos com capítulo
-  rl_procedimento_cid.txt  → cruzamento proc×CID (~50k pares)
-  tb_grupo.txt             → nomes dos grupos
-  tb_sub_grupo.txt         → nomes dos subgrupos
-
-Campos em additional_info (SIGTAP):
-  complexidade, tipo_financiamento, valor_ambulatorial, valor_hospitalar,
-  valor_profissional, faixa_etaria, sexo_compativel, qt_maxima_execucao,
-  cids_compativeis (lista), n_cids_compativeis
-
-Campos em additional_info (CID10):
-  capitulo, n_procedimentos, procedimentos_exemplos
 """
 import json
 import logging
@@ -45,11 +30,9 @@ _COMPLEXIDADE = {
 }
 _SEXO = {"0": "Ambos", "1": "Masculino", "3": "Feminino"}
 _FINANCIAMENTO = {
-    "001": "PAB",  "01": "PAB",
-    "004": "FAEC", "04": "FAEC",
-    "005": "MAC",  "05": "MAC",
-    "006": "FNS",  "06": "FNS",
-    "007": "FAEC", "07": "FAEC",
+    "001": "PAB", "01": "PAB", "004": "FAEC", "04": "FAEC",
+    "005": "MAC", "05": "MAC", "006": "FNS",  "06": "FNS",
+    "007": "FAEC","07": "FAEC",
 }
 _CAPITULO_CID = {
     "A": "Doenças infecciosas e parasitárias",
@@ -80,32 +63,50 @@ _CAPITULO_CID = {
 }
 
 
-# ─────────────────────────────────────────────────── helpers
-
 def _val_reais(raw: str) -> Optional[str]:
     try:
         v = raw.strip()
         if not v or v == "0" * len(v):
             return None
         c = int(v)
-        if c == 0:
-            return None
-        return f"R$ {c/100:,.2f}".replace(",","X").replace(".",",").replace("X",".")
+        return None if c == 0 else f"R$ {c/100:,.2f}".replace(",","X").replace(".",",").replace("X",".")
     except Exception:
         return None
 
 
-def _idade_str(raw: str) -> Optional[str]:
+def _faixa_etaria(min_raw: str, max_raw: str) -> Optional[str]:
+    """
+    Constrói a faixa etária SÓ quando há restrição real.
+
+    No SIGTAP:
+      "0000" = sem restrição de idade mínima
+      "9999" = sem restrição de idade máxima
+      qualquer outro valor = restrição real em anos
+
+    Exemplos corretos:
+      "0000" / "9999" → None (sem restrição — não exibe)
+      "0000" / "0060" → "até 60 anos"
+      "0012" / "9999" → "a partir de 12 anos"
+      "0012" / "0060" → "12 a 60 anos"
+    """
     try:
-        n = int(raw.strip() or "0")
-        if n == 0:    return "0 anos"
-        if n >= 9999: return "sem limite"
-        return f"{n} anos" if n < 130 else f"{n//12} anos"
+        n_min = int(min_raw.strip()) if min_raw.strip() else 0
+        n_max = int(max_raw.strip()) if max_raw.strip() else 0
+
+        tem_min = n_min > 0
+        tem_max = 0 < n_max < 9999
+
+        if not tem_min and not tem_max:
+            return None   # "0000"/"9999" ou "0000"/"0000" — sem restrição real
+
+        if tem_min and tem_max:
+            return f"{n_min} a {n_max} anos"
+        if tem_min:
+            return f"a partir de {n_min} anos"
+        return f"até {n_max} anos"
     except Exception:
         return None
 
-
-# ─────────────────────────────────────────────────── descoberta de URL
 
 def _get_url_from_github() -> Optional[str]:
     try:
@@ -142,8 +143,6 @@ def get_sigtap_zip_url() -> Optional[str]:
     return _get_url_from_github() or _get_url_from_portal()
 
 
-# ─────────────────────────────────────────────────── helpers de ZIP
-
 def _find_in_zip(zf: zipfile.ZipFile, basename: str) -> Optional[str]:
     pat = basename.lower()
     for name in zf.namelist():
@@ -157,24 +156,7 @@ def _read_raw(zf: zipfile.ZipFile, basename: str) -> Optional[str]:
     return zf.read(e).decode("latin-1") if e else None
 
 
-# ─────────────────────────────────────────────────── parsers posição fixa
-
 def _parse_procedimentos(content: str) -> list[dict]:
-    """
-    Posições 0-indexed do tb_procedimento.txt:
-      [0:10]   co_procedimento
-      [10:110] no_procedimento
-      [110:116] dt_competencia
-      [116:122] qt_maxima_execucao
-      [134:143] vl_servico_hospitalar
-      [143:152] vl_servico_ambulatorial
-      [152:161] vl_servico_profissional
-      [179:180] co_complexidade
-      [180:181] co_sexo
-      [181:185] vl_idade_minima
-      [185:189] vl_idade_maxima
-      [190:193] co_tipo_financiamento
-    """
     records = []
     for line in content.splitlines():
         line = line.rstrip("\r\n")
@@ -189,15 +171,15 @@ def _parse_procedimentos(content: str) -> list[dict]:
             "no_procedimento": name,
             "dt_competencia":  line[110:116].strip() if len(line) > 110 else "",
         }
-        if len(line) > 122: rec["qt_max_exec"]     = line[116:122].strip()
-        if len(line) > 143: rec["vl_hospitalar"]   = line[134:143].strip()
-        if len(line) > 152: rec["vl_ambulatorial"] = line[143:152].strip()
-        if len(line) > 161: rec["vl_profissional"] = line[152:161].strip()
-        if len(line) > 180: rec["co_complexidade"] = line[179:180].strip()
-        if len(line) > 181: rec["co_sexo"]         = line[180:181].strip()
-        if len(line) > 185: rec["vl_idade_min"]    = line[181:185].strip()
-        if len(line) > 189: rec["vl_idade_max"]    = line[185:189].strip()
-        if len(line) > 193: rec["co_financiamento"]= line[190:193].strip()
+        if len(line) > 122: rec["qt_max_exec"]      = line[116:122].strip()
+        if len(line) > 143: rec["vl_hospitalar"]    = line[134:143].strip()
+        if len(line) > 152: rec["vl_ambulatorial"]  = line[143:152].strip()
+        if len(line) > 161: rec["vl_profissional"]  = line[152:161].strip()
+        if len(line) > 180: rec["co_complexidade"]  = line[179:180].strip()
+        if len(line) > 181: rec["co_sexo"]          = line[180:181].strip()
+        if len(line) > 185: rec["vl_idade_min"]     = line[181:185].strip()
+        if len(line) > 189: rec["vl_idade_max"]     = line[185:189].strip()
+        if len(line) > 193: rec["co_financiamento"] = line[190:193].strip()
         records.append(rec)
     logger.info(f"[SIGTAP] {len(records)} procedimentos parseados.")
     return records
@@ -223,13 +205,6 @@ def _parse_cid(content: str) -> list[dict]:
 
 
 def _parse_proc_cid_compat(content: str) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
-    """
-    rl_procedimento_cid.txt: [0:10] co_procedimento | [10:14] co_cid
-
-    Retorna:
-      proc_to_cids: {co_procedimento → [co_cid, ...]}
-      cid_to_procs: {co_cid → [co_procedimento, ...]}
-    """
     proc_to_cids: dict[str, list[str]] = {}
     cid_to_procs: dict[str, list[str]] = {}
     n = 0
@@ -242,12 +217,9 @@ def _parse_proc_cid_compat(content: str) -> tuple[dict[str, list[str]], dict[str
         if not proc or not cid or not re.match(r"^\d{10}$", proc):
             continue
         proc_to_cids.setdefault(proc, []).append(cid)
-        cid_to_procs.setdefault(cid, []).append(proc)
+        cid_to_procs.setdefault(cid,  []).append(proc)
         n += 1
-    logger.info(
-        f"[SIGTAP×CID] {n:,} pares | "
-        f"{len(proc_to_cids):,} procedimentos | {len(cid_to_procs):,} CIDs únicos"
-    )
+    logger.info(f"[SIGTAP×CID] {n:,} pares | {len(proc_to_cids):,} procedimentos | {len(cid_to_procs):,} CIDs")
     return proc_to_cids, cid_to_procs
 
 
@@ -268,8 +240,6 @@ def _parse_subgrupos(content: str) -> dict[str, str]:
             result[line[0:4].strip()] = line[4:104].strip()
     return result
 
-
-# ─────────────────────────────────────────────────── ETL
 
 class SIGTAPEtl(BaseETL):
     SOURCE_CODE = "SIGTAP"
@@ -292,40 +262,24 @@ class SIGTAPEtl(BaseETL):
             return self.zip_path
         url = get_sigtap_zip_url()
         if not url:
-            raise RuntimeError(
-                "ZIP SIGTAP não encontrado. Baixe em:\n"
-                "  https://github.com/RenatoKR/SIGTAP/tree/main/tabelas\n"
-                "Salve em: ./data/sigtap_latest.zip"
-            )
+            raise RuntimeError("ZIP SIGTAP não encontrado.")
         return download_file(url, self.zip_path, timeout=settings.REQUESTS_TIMEOUT)
 
     def extract(self) -> list[dict]:
         zip_path = self._ensure_zip()
         raw: list[dict] = []
-
         with zipfile.ZipFile(zip_path, "r") as zf:
-            # Procedimentos
             if proc_raw := _read_raw(zf, "tb_procedimento.txt"):
                 for r in _parse_procedimentos(proc_raw):
                     r["_type"] = "procedimento"
                     raw.append(r)
-            else:
-                logger.error("tb_procedimento.txt NÃO encontrado no ZIP!")
-
-            # CID-10
             if cid_raw := _read_raw(zf, "tb_cid.txt"):
                 for r in _parse_cid(cid_raw):
                     r["_type"] = "cid"
                     raw.append(r)
-
-            # Cruzamento procedimento × CID
             compat_raw = _read_raw(zf, "rl_procedimento_cid.txt")
             if compat_raw:
                 self._proc_to_cids, self._cid_to_procs = _parse_proc_cid_compat(compat_raw)
-            else:
-                logger.warning("[SIGTAP×CID] rl_procedimento_cid.txt não encontrado no ZIP")
-
-            # Grupos e subgrupos
             grp       = _read_raw(zf, "tb_grupo.txt")
             grupos    = _parse_grupos(grp) if grp else {}
             sub       = _read_raw(zf, "tb_sub_grupo.txt")
@@ -354,28 +308,29 @@ class SIGTAPEtl(BaseETL):
 
                 if (v := r.get("co_complexidade", "")):
                     info["complexidade"] = _COMPLEXIDADE.get(v, v)
-                if (v := r.get("co_sexo", "")):
+                if (v := r.get("co_sexo", "")) and v != "0":
+                    # "0" = Ambos = sem restrição — só exibe se houver restrição real
                     info["sexo_compativel"] = _SEXO.get(v, v)
 
                 fin = r.get("co_financiamento", "")
-                fin_k = fin.lstrip("0") or fin
                 if fin:
+                    fin_k = fin.lstrip("0") or fin
                     info["tipo_financiamento"] = _FINANCIAMENTO.get(fin, _FINANCIAMENTO.get(fin_k, fin_k))
 
                 if (v := _val_reais(r.get("vl_ambulatorial", ""))): info["valor_ambulatorial"] = v
                 if (v := _val_reais(r.get("vl_hospitalar",  ""))): info["valor_hospitalar"]   = v
                 if (v := _val_reais(r.get("vl_profissional",""))): info["valor_profissional"]  = v
 
-                i_min = _idade_str(r.get("vl_idade_min",""))
-                i_max = _idade_str(r.get("vl_idade_max",""))
-                if i_min and i_max: info["faixa_etaria"] = f"{i_min} a {i_max}"
+                # ── Faixa etária: só exibe quando há restrição real (não "0000/0000")
+                faixa = _faixa_etaria(r.get("vl_idade_min",""), r.get("vl_idade_max",""))
+                if faixa:
+                    info["faixa_etaria"] = faixa
 
                 qt = r.get("qt_max_exec","").strip().lstrip("0")
                 if qt:
                     try: info["qt_maxima_execucao"] = int(qt)
                     except Exception: pass
 
-                # Cruzamento: CIDs compatíveis
                 cids = self._proc_to_cids.get(code, [])
                 if cids:
                     info["cids_compativeis"]   = cids[:20]
@@ -389,10 +344,7 @@ class SIGTAPEtl(BaseETL):
                     "category":          r.pop("_grupo","")    or None,
                     "subcategory":       r.pop("_subgrupo","") or None,
                     "additional_info":   json.dumps(info, ensure_ascii=False),
-                    "official_url": (
-                        f"http://sigtap.datasus.gov.br"
-                        f"/tabela-unificada/app/sec/procedimento/exibir/{code}"
-                    ),
+                    "official_url":      f"http://sigtap.datasus.gov.br/tabela-unificada/app/sec/procedimento/exibir/{code}",
                     "source_competency": r.get("dt_competencia") or None,
                     "last_updated":      None,
                 })
@@ -406,8 +358,6 @@ class SIGTAPEtl(BaseETL):
                 capitulo = _CAPITULO_CID.get(code[0].upper(), "")
                 info: dict = {}
                 if capitulo: info["capitulo"] = capitulo
-
-                # Cruzamento: procedimentos que usam este CID
                 procs = self._cid_to_procs.get(code, [])
                 if procs:
                     info["n_procedimentos"]        = len(procs)
@@ -427,46 +377,19 @@ class SIGTAPEtl(BaseETL):
                 })
                 n_cid += 1
 
-        n_procs_com_cid = sum(
-            1 for r in records
-            if r["source"] == "SIGTAP" and json.loads(r["additional_info"]).get("cids_compativeis")
-        )
-        n_cids_com_proc = sum(
-            1 for r in records
-            if r["source"] == "CID10" and json.loads(r["additional_info"]).get("n_procedimentos")
-        )
-        logger.info(
-            f"[transform] SIGTAP={n_proc} ({n_procs_com_cid} com CIDs) | "
-            f"CID10={n_cid} ({n_cids_com_proc} com procs) | total={len(records)}"
-        )
+        logger.info(f"[transform] SIGTAP={n_proc} | CID10={n_cid} | total={len(records)}")
         return records
 
     def load(self, records: list[dict]) -> int:
         for src in ("SIGTAP", "CID10"):
             deleted = self.repo.delete_by_source(src)
             logger.info(f"[{src}] {deleted} removidos.")
-
         inserted = self.repo.bulk_insert(records)
-
         n_sigtap = sum(1 for r in records if r.get("source") == "SIGTAP")
         n_cid10  = sum(1 for r in records if r.get("source") == "CID10")
-
-        # Passa a competência para a tabela sources (ex: "202606" → aparece como "Jun/2026")
-        comp_sigtap = next(
-            (r["source_competency"] for r in records
-             if r.get("source") == "SIGTAP" and r.get("source_competency")),
-            None,
-        )
-        comp_cid10 = next(
-            (r["source_competency"] for r in records
-             if r.get("source") == "CID10" and r.get("source_competency")),
-            None,
-        )
-
+        comp_sigtap = next((r["source_competency"] for r in records if r.get("source") == "SIGTAP" and r.get("source_competency")), None)
+        comp_cid10  = next((r["source_competency"] for r in records if r.get("source") == "CID10"  and r.get("source_competency")), None)
         self.repo.update_source_stats("SIGTAP", n_sigtap, competency=comp_sigtap)
         self.repo.update_source_stats("CID10",  n_cid10,  competency=comp_cid10)
-        logger.info(
-            f"SIGTAP={n_sigtap} (comp={comp_sigtap}) | "
-            f"CID10={n_cid10} (comp={comp_cid10}) | total={inserted}"
-        )
+        logger.info(f"SIGTAP={n_sigtap} (comp={comp_sigtap}) | CID10={n_cid10} | total={inserted}")
         return inserted

@@ -24,18 +24,16 @@ export default function App() {
   return (
     <div className={`app${hasSearched ? " app--results" : ""}`}>
       <header className="app-header">
-        {/* Logo */}
         <div className="logo-wrap">
           <span className="logo-icon" aria-hidden="true">🔬</span>
           <h1 className="logo-title">SUS Search</h1>
           {!hasSearched && mode === "search" && (
             <p className="logo-subtitle">
-              Mecanismo de busca unificado para informações oficiais do SUS
+              Mecanismo de busca unificado para terminologias oficiais do SUS
             </p>
           )}
         </div>
 
-        {/* Toggle de modo */}
         <div className="mode-toggle" role="group" aria-label="Modo de interação">
           <button
             className={`mode-btn${mode === "search" ? " active" : ""}`}
@@ -53,7 +51,6 @@ export default function App() {
           </button>
         </div>
 
-        {/* Barra de busca — só no modo busca */}
         {mode === "search" && (
           <>
             <SearchBar
@@ -68,22 +65,22 @@ export default function App() {
         )}
       </header>
 
-      {/* Hero — só na tela inicial do modo busca */}
+      {/* Hero — tela inicial */}
       {!hasSearched && mode === "search" && (
         <section className="hero-sources">
-          <p className="hero-label">Fontes disponíveis</p>
+          <p className="hero-label">Fontes indexadas</p>
           <div className="hero-chips">
             <span className="hero-chip sigtap">SIGTAP — Procedimentos SUS</span>
             <span className="hero-chip cid10">CID-10 — Classificação de Doenças</span>
-            <span className="hero-chip cnes">CNES — Estabelecimentos de Saúde</span>
+            <span className="hero-chip ciap2">CIAP-2 — Atenção Primária</span>
+            <span className="hero-chip cnes">CNES — Estabelecimentos</span>
           </div>
           <p className="hero-hint">
-            Busque por nome, código ou descrição — ex: "pneumonia", "J18", "0301010013"
+            Busque por nome, código ou descrição — ex: "pneumonia", "J18", "P76", "0309050022"
           </p>
         </section>
       )}
 
-      {/* Conteúdo principal */}
       <main className="app-main">
         {mode === "search" && (
           <SearchResults
@@ -100,7 +97,7 @@ export default function App() {
 
       <footer className="app-footer">
         <p>
-          Dados: SIGTAP · CID-10 · CNES — Ministério da Saúde ·{" "}
+          Dados: SIGTAP · CID-10 · CIAP-2 · CNES — Ministério da Saúde / WONCA ·{" "}
           <a href="/api/v1/health" target="_blank" rel="noopener noreferrer">
             API Status
           </a>
