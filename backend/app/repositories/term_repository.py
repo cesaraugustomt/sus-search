@@ -81,10 +81,19 @@ class TermRepository:
         return self.db.get(Term, term_id)
 
     # ────────────────────────────────────────────────────────── escrita em lote
+    #
+    # IMPORTANTE — transação atômica:
+    # Nenhum destes métodos faz commit() por conta própria. O commit é
+    # responsabilidade exclusiva de quem orquestra a operação (ver
+    # etl/base.py BaseETL.load()), garantindo que delete + insert
+    # aconteçam na MESMA transação. Se o insert falhar ou retornar 0
+    # registros, um rollback() desfaz o delete também — nunca ficamos
+    # com a fonte apagada e vazia.
+    #
     def bulk_insert(self, records: list[dict]) -> int:
         """
-        Insere em lote.
-        CAST(:additional_info AS jsonb) — evita conflito entre o operador
+        Insere em lote. NÃO comita — ver nota acima.
+        CAST(:additional_info AS jsonb) evita conflito entre o operador
         de cast PostgreSQL '::' e a detecção de parâmetros do SQLAlchemy.
         ON CONFLICT (code, source) WHERE code IS NOT NULL DO NOTHING
         garante idempotência sem duplicatas.
@@ -105,15 +114,14 @@ class TermRepository:
             DO NOTHING
         """)
         self.db.execute(stmt, records)
-        self.db.commit()
         return len(records)
 
     def delete_by_source(self, source: str) -> int:
+        """Remove registros de uma fonte. NÃO comita — ver nota acima."""
         result = self.db.execute(
             text("DELETE FROM terms WHERE source = :source"),
             {"source": source.upper()},
         )
-        self.db.commit()
         return result.rowcount
 
     # ──────────────────────────────────────────────────── estatísticas fontes
@@ -123,6 +131,7 @@ class TermRepository:
     def update_source_stats(
         self, source_code: str, count: int, competency: Optional[str] = None
     ) -> None:
+        """Atualiza estatísticas da fonte. NÃO comita — ver nota acima."""
         params: dict = {"code": source_code, "count": count}
         extra = ""
         if competency:
@@ -136,7 +145,6 @@ class TermRepository:
             """),
             params,
         )
-        self.db.commit()
 
     def count_all(self) -> int:
         return self.db.execute(text("SELECT COUNT(*) FROM terms")).scalar() or 0

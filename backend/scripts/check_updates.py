@@ -14,10 +14,19 @@ import json
 import requests
 from datetime import datetime, timezone
 
-# ── detecta se está rodando no GitHub Actions
 IS_GH_ACTIONS = "GITHUB_OUTPUT" in os.environ
 FORCE         = os.environ.get("FORCE", "false").lower() == "true"
-FONTE         = os.environ.get("FONTE", "all")
+
+# CORRIGIDO: antes, FONTE = os.environ.get("FONTE", "all") fazia com que,
+# no disparo agendado (schedule, sem inputs), FONTE virasse sempre "all" e
+# a condição `FONTE in ("sigtap","all")` fosse SEMPRE verdadeira — disparando
+# o ETL destrutivo do SIGTAP TODO DIA, mesmo sem necessidade. Isso causou
+# perda de dados em produção quando o download do ZIP falhava no runner
+# (sem cache local) e o delete já tinha sido comitado.
+#
+# Agora: FONTE só é usada para decidir o ALVO da atualização manual
+# (workflow_dispatch). NUNCA força sigtap_updated=True por si só.
+FONTE = os.environ.get("FONTE", "")
 
 GITHUB_API    = "https://api.github.com/repos/RenatoKR/SIGTAP/commits"
 DATABASE_URL  = os.environ.get("DATABASE_URL", "")
@@ -35,7 +44,6 @@ def set_output(key: str, value: str) -> None:
 
 
 def get_sigtap_github_date() -> tuple[str, str]:
-    """Retorna (data_iso, nome_arquivo) do ZIP mais recente no GitHub mirror."""
     try:
         resp = requests.get(
             "https://api.github.com/repos/RenatoKR/SIGTAP/contents/tabelas",
@@ -48,7 +56,6 @@ def get_sigtap_github_date() -> tuple[str, str]:
             reverse=True,
         )
         if files:
-            # Busca data do último commit que tocou a pasta
             commits = requests.get(
                 GITHUB_API,
                 params={"path": "tabelas", "per_page": 1},
@@ -62,22 +69,24 @@ def get_sigtap_github_date() -> tuple[str, str]:
 
 
 def get_db_loaded_at(source_code: str) -> str | None:
-    """Retorna ISO string da última carga de uma fonte no banco."""
     if not DATABASE_URL:
-        log("  ⚠ DATABASE_URL não configurado — assumindo que é necessário atualizar")
-        return None
+        log("  ⚠ DATABASE_URL não configurado — assumindo que NÃO é necessário atualizar (seguro por padrão)")
+        return "unknown-but-present"
     try:
         from sqlalchemy import create_engine, text
         engine = create_engine(DATABASE_URL)
         with engine.connect() as conn:
             row = conn.execute(
-                text("SELECT loaded_at FROM sources WHERE code = :code"),
+                text("SELECT loaded_at, record_count FROM sources WHERE code = :code"),
                 {"code": source_code},
             ).fetchone()
-            return row[0].isoformat() if row and row[0] else None
+            if row and row[1] and row[1] > 0:
+                return row[0].isoformat() if row[0] else "unknown-but-present"
+            return None  # fonte nunca carregada OU com 0 registros
     except Exception as e:
         log(f"  ⚠ Erro ao consultar banco: {e}")
-        return None
+        # Em caso de erro de conexão, NÃO força update — seguro por padrão
+        return "unknown-but-present"
 
 
 def main() -> None:
@@ -90,31 +99,31 @@ def main() -> None:
     github_date, arquivo = get_sigtap_github_date()
     db_date              = get_db_loaded_at("SIGTAP")
     log(f"  GitHub mais recente : {github_date} ({arquivo})")
-    log(f"  Banco loaded_at     : {db_date or 'nunca carregado'}")
+    log(f"  Banco loaded_at     : {db_date or 'nunca carregado / vazio'}")
 
     sigtap_updated = (
         FORCE
-        or db_date is None
-        or (bool(github_date) and github_date > db_date)
-        or FONTE in ("sigtap", "all")
+        or db_date is None                                          # nunca carregado ou com 0 registros
+        or (bool(github_date) and db_date != "unknown-but-present" and github_date > db_date)
+        or FONTE == "sigtap"                                         # só força via dispatch explícito
     )
     log(f"  Necessita update    : {sigtap_updated}")
     set_output("sigtap_updated", str(sigtap_updated).lower())
     set_output("sigtap_file",    arquivo)
 
-    # ── CNES (DEMAS — sempre disponível, atualiza mensalmente)
+    # ── CNES
     log("\n▶ CNES (API DEMAS):")
     cnes_date = get_db_loaded_at("CNES")
-    log(f"  Banco loaded_at     : {cnes_date or 'nunca carregado'}")
+    log(f"  Banco loaded_at     : {cnes_date or 'nunca carregado / vazio'}")
 
-    if cnes_date:
+    if cnes_date and cnes_date != "unknown-but-present":
         from datetime import timedelta
         last = datetime.fromisoformat(cnes_date.replace("Z", "+00:00"))
         days_since = (datetime.now(timezone.utc) - last).days
         log(f"  Dias desde última carga: {days_since}")
-        cnes_updated = FORCE or days_since >= 30 or FONTE in ("cnes", "all")
+        cnes_updated = FORCE or days_since >= 30 or FONTE == "cnes"
     else:
-        cnes_updated = True
+        cnes_updated = cnes_date is None  # só força se nunca carregado/vazio
 
     log(f"  Necessita update    : {cnes_updated}")
     set_output("cnes_updated", str(cnes_updated).lower())

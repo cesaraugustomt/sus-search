@@ -13,7 +13,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from app.core.config import get_settings
-from etl.base import BaseETL, download_file
+from etl.base import BaseETL, ETLAbortedSafety, download_file
 
 settings = get_settings()
 logger   = logging.getLogger(__name__)
@@ -77,13 +77,6 @@ def _val_reais(raw: str) -> Optional[str]:
 def _faixa_etaria(min_raw: str, max_raw: str) -> Optional[str]:
     """
     Constrói a faixa etária SÓ quando há restrição real.
-
-    No SIGTAP:
-      "0000" = sem restrição de idade mínima
-      "9999" = sem restrição de idade máxima
-      qualquer outro valor = restrição real em anos
-
-    Exemplos corretos:
       "0000" / "9999" → None (sem restrição — não exibe)
       "0000" / "0060" → "até 60 anos"
       "0012" / "9999" → "a partir de 12 anos"
@@ -92,13 +85,10 @@ def _faixa_etaria(min_raw: str, max_raw: str) -> Optional[str]:
     try:
         n_min = int(min_raw.strip()) if min_raw.strip() else 0
         n_max = int(max_raw.strip()) if max_raw.strip() else 0
-
         tem_min = n_min > 0
         tem_max = 0 < n_max < 9999
-
         if not tem_min and not tem_max:
-            return None   # "0000"/"9999" ou "0000"/"0000" — sem restrição real
-
+            return None
         if tem_min and tem_max:
             return f"{n_min} a {n_max} anos"
         if tem_min:
@@ -309,7 +299,6 @@ class SIGTAPEtl(BaseETL):
                 if (v := r.get("co_complexidade", "")):
                     info["complexidade"] = _COMPLEXIDADE.get(v, v)
                 if (v := r.get("co_sexo", "")) and v != "0":
-                    # "0" = Ambos = sem restrição — só exibe se houver restrição real
                     info["sexo_compativel"] = _SEXO.get(v, v)
 
                 fin = r.get("co_financiamento", "")
@@ -321,7 +310,6 @@ class SIGTAPEtl(BaseETL):
                 if (v := _val_reais(r.get("vl_hospitalar",  ""))): info["valor_hospitalar"]   = v
                 if (v := _val_reais(r.get("vl_profissional",""))): info["valor_profissional"]  = v
 
-                # ── Faixa etária: só exibe quando há restrição real (não "0000/0000")
                 faixa = _faixa_etaria(r.get("vl_idade_min",""), r.get("vl_idade_max",""))
                 if faixa:
                     info["faixa_etaria"] = faixa
@@ -381,15 +369,42 @@ class SIGTAPEtl(BaseETL):
         return records
 
     def load(self, records: list[dict]) -> int:
-        for src in ("SIGTAP", "CID10"):
-            deleted = self.repo.delete_by_source(src)
-            logger.info(f"[{src}] {deleted} removidos.")
-        inserted = self.repo.bulk_insert(records)
+        """
+        Remove SIGTAP + CID10 antigos e insere os novos — de forma ATÔMICA.
+
+        GUARDS CRÍTICOS (proteção contra a perda de dados que já aconteceu):
+          1. Se SIGTAP ou CID10 vier vazio na extração (ex: ZIP corrompido,
+             rate limit no GitHub mirror, parsing parcial) → ABORTA sem
+             tocar no banco. Nunca apaga uma fonte para deixá-la vazia.
+          2. delete + insert + stats das DUAS fontes ficam na MESMA
+             transação. Qualquer exceção dispara rollback() completo.
+        """
         n_sigtap = sum(1 for r in records if r.get("source") == "SIGTAP")
         n_cid10  = sum(1 for r in records if r.get("source") == "CID10")
-        comp_sigtap = next((r["source_competency"] for r in records if r.get("source") == "SIGTAP" and r.get("source_competency")), None)
-        comp_cid10  = next((r["source_competency"] for r in records if r.get("source") == "CID10"  and r.get("source_competency")), None)
-        self.repo.update_source_stats("SIGTAP", n_sigtap, competency=comp_sigtap)
-        self.repo.update_source_stats("CID10",  n_cid10,  competency=comp_cid10)
-        logger.info(f"SIGTAP={n_sigtap} (comp={comp_sigtap}) | CID10={n_cid10} | total={inserted}")
-        return inserted
+
+        if n_sigtap == 0 or n_cid10 == 0:
+            raise ETLAbortedSafety(
+                f"[SIGTAP] Extração incompleta — SIGTAP={n_sigtap}, CID10={n_cid10}. "
+                f"Abortando SEM apagar dados existentes."
+            )
+
+        try:
+            for src in ("SIGTAP", "CID10"):
+                deleted = self.repo.delete_by_source(src)
+                logger.info(f"[{src}] {deleted} registros antigos marcados (não comitado ainda).")
+
+            inserted = self.repo.bulk_insert(records)
+
+            comp_sigtap = next((r["source_competency"] for r in records if r.get("source") == "SIGTAP" and r.get("source_competency")), None)
+            comp_cid10  = next((r["source_competency"] for r in records if r.get("source") == "CID10"  and r.get("source_competency")), None)
+            self.repo.update_source_stats("SIGTAP", n_sigtap, competency=comp_sigtap)
+            self.repo.update_source_stats("CID10",  n_cid10,  competency=comp_cid10)
+
+            self.db.commit()
+            logger.info(f"SIGTAP={n_sigtap} (comp={comp_sigtap}) | CID10={n_cid10} (comp={comp_cid10}) | total={inserted} | Transação comitada.")
+            return inserted
+
+        except Exception:
+            self.db.rollback()
+            logger.error("[SIGTAP] Erro durante load — ROLLBACK aplicado, nenhum dado foi perdido.", exc_info=True)
+            raise

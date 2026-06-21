@@ -1,5 +1,13 @@
 """
 ETL Base — classes e utilitários compartilhados por todos os importadores.
+
+SEGURANÇA DE DADOS — leia antes de modificar:
+A combinação delete-then-insert é perigosa se não for atômica. Esta classe
+garante duas proteções:
+  1. Guard: se transform() devolve 0 registros, ABORTA antes de deletar
+     qualquer coisa — nunca apaga uma fonte para deixá-la vazia.
+  2. Transação única: delete + insert + update_stats compartilham a mesma
+     transação SQL. Qualquer exceção dispara rollback() do delete também.
 """
 import ftplib
 import logging
@@ -22,21 +30,15 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class FieldLayout:
-    """Define a posição e tamanho de um campo em um arquivo TXT posicional."""
     name: str
-    start: int   # 0-indexado
+    start: int
     length: int
 
 
 def parse_layout_file(content: str) -> list[FieldLayout]:
-    """
-    Lê o arquivo de layout do SIGTAP/RTS.
-    Formato: CSV com colunas  nome, posição_inicial (1-indexed), tamanho, ...
-    Converte posição para 0-indexed.
-    """
     fields: list[FieldLayout] = []
     lines = content.strip().splitlines()
-    for line in lines[1:]:       # pula cabeçalho
+    for line in lines[1:]:
         line = line.strip()
         if not line:
             continue
@@ -45,7 +47,7 @@ def parse_layout_file(content: str) -> list[FieldLayout]:
             continue
         try:
             name   = parts[0].strip().lower()
-            start  = int(parts[1].strip()) - 1   # 1-idx → 0-idx
+            start  = int(parts[1].strip()) - 1
             length = int(parts[2].strip())
             fields.append(FieldLayout(name, start, length))
         except (ValueError, IndexError):
@@ -54,7 +56,6 @@ def parse_layout_file(content: str) -> list[FieldLayout]:
 
 
 def parse_fixed_width_line(line: str, fields: list[FieldLayout]) -> dict:
-    """Extrai campos de uma linha de largura fixa usando o layout."""
     result: dict = {}
     for f in fields:
         end = f.start + f.length
@@ -64,16 +65,11 @@ def parse_fixed_width_line(line: str, fields: list[FieldLayout]) -> dict:
 
 
 def download_file(url: str, dest: Path, timeout: int = None) -> Path:
-    """
-    Faz download de um arquivo e salva em `dest`.
-    Suporta HTTP, HTTPS e FTP (via urllib).
-    """
     timeout = timeout or settings.REQUESTS_TIMEOUT
     dest.parent.mkdir(parents=True, exist_ok=True)
     logger.info(f"Baixando {url} → {dest}")
 
     if url.lower().startswith("ftp://"):
-        # requests não suporta FTP — usa urllib, que suporta nativamente
         urllib.request.urlretrieve(url, str(dest))
     else:
         resp = requests.get(url, timeout=timeout, stream=True, verify=False)
@@ -87,10 +83,19 @@ def download_file(url: str, dest: Path, timeout: int = None) -> Path:
     return dest
 
 
+class ETLAbortedSafety(RuntimeError):
+    """Levantada quando o ETL é abortado por proteção de segurança de dados."""
+
+
 class BaseETL(ABC):
     """Classe base para todos os importadores ETL."""
 
     SOURCE_CODE: str = ""
+
+    # Lista de códigos de fonte que este ETL gerencia.
+    # Por padrão, apenas SOURCE_CODE. Sobrescreva em subclasses que
+    # gerenciam múltiplas fontes (ex: SIGTAPEtl gerencia SIGTAP + CID10).
+    MANAGED_SOURCES: list[str] = []
 
     def __init__(self, db: Session, data_dir: Optional[str] = None):
         self.db        = db
@@ -109,16 +114,39 @@ class BaseETL(ABC):
         ...
 
     def load(self, records: list[dict]) -> int:
-        """Remove registros antigos da fonte e insere os novos."""
-        logger.info(f"[{self.SOURCE_CODE}] Removendo registros antigos...")
-        deleted = self.repo.delete_by_source(self.SOURCE_CODE)
-        logger.info(f"[{self.SOURCE_CODE}] {deleted} removidos.")
+        """
+        Remove registros antigos da fonte e insere os novos — de forma ATÔMICA.
 
-        logger.info(f"[{self.SOURCE_CODE}] Inserindo {len(records)} registros...")
-        inserted = self.repo.bulk_insert(records)
-        self.repo.update_source_stats(self.SOURCE_CODE, inserted)
-        logger.info(f"[{self.SOURCE_CODE}] {inserted} inseridos.")
-        return inserted
+        GUARD CRÍTICO: se `records` estiver vazio, levanta ETLAbortedSafety
+        e NÃO toca no banco. Isso impede que uma falha de extração (ex: ZIP
+        corrompido, rate limit de API, parsing que retornou 0 linhas) apague
+        dados válidos existentes sem substituí-los.
+        """
+        if not records:
+            raise ETLAbortedSafety(
+                f"[{self.SOURCE_CODE}] transform() retornou 0 registros. "
+                f"Abortando SEM apagar dados existentes — provável falha "
+                f"de extração (download incompleto, rate limit, parsing)."
+            )
+
+        sources = self.MANAGED_SOURCES or [self.SOURCE_CODE]
+        try:
+            total_deleted = 0
+            for src in sources:
+                total_deleted += self.repo.delete_by_source(src)
+            logger.info(f"[{self.SOURCE_CODE}] {total_deleted} registros antigos marcados para remoção (não comitado ainda).")
+
+            inserted = self.repo.bulk_insert(records)
+            self.repo.update_source_stats(self.SOURCE_CODE, inserted)
+
+            self.db.commit()   # ← commit único: delete + insert + stats juntos
+            logger.info(f"[{self.SOURCE_CODE}] {inserted} inseridos. Transação comitada.")
+            return inserted
+
+        except Exception:
+            self.db.rollback()
+            logger.error(f"[{self.SOURCE_CODE}] Erro durante load — ROLLBACK aplicado, nenhum dado foi perdido.", exc_info=True)
+            raise
 
     def run(self) -> int:
         logger.info(f"[{self.SOURCE_CODE}] ── ETL iniciado ──")
